@@ -1,6 +1,7 @@
 module dircd.irc.IRC;
 
-import core.thread: Thread;
+import vibe.core.net  : TCPConnection;
+import vibe.core.core : runTask;
 
 import dircd.irc.Channel;
 import dircd.irc.commands._;
@@ -12,13 +13,11 @@ import std.c.stdlib: exit;
 import std.conv: to;
 import std.datetime: Clock, SysTime;
 import std.regex: regex, Regex, match, rreplace = replace, Captures;
-import std.socket: Socket, SocketException, SocketType, AddressFamily, InternetAddress;
 import std.stdio: writeln;
 import std.string: toLower, strip;
 import std.utf: UTFException, toUTF8;
 
 public class IRC {
-    private Socket s;
     /**
     * This supports &amp;, +, !, and # as channel starters (per IRC RFC - see
     * http://tools.ietf.org/html/rfc1459.html#section-1.3). The only additional restriction on channel names imposed
@@ -31,7 +30,7 @@ public class IRC {
     private Regex!char lineRegex = regex(r"^(:(?P<prefix>\S+) )?(?P<command>\S+)( (?!:)(?P<params>.+?))?( :(?P<trail>.+)?)?$", "g");
     private string host;
     private string pass;
-    private short port;
+    private ushort port;
 
     private SysTime created;
 
@@ -40,18 +39,10 @@ public class IRC {
     private User[] users;
     private Channel[string] channels;
 
-    public this(string host, short port, string pass) {
+    public this(string host, ushort port, string pass) {
         created = Clock.currTime;
         addCommands();
         this.host = host, this.port = port, this.pass = pass;
-        try {
-            s = new Socket(AddressFamily.INET, SocketType.STREAM);
-            s.bind(new InternetAddress(host, port));
-        } catch (SocketException s) {
-            writeln("Couldn't connect!");
-            exit(1);
-        }
-        s.listen(100);
     }
 
     private void addCommands() {
@@ -156,39 +147,105 @@ public class IRC {
         users ~= u;
     }
 
-    public void shutdown() {
-        s.close();
-    }
+    /** Handle incoming TCP connections. */
+    public void handleTCP (TCPConnection conn) {
 
-    /**
-     * Returns if the connection is still live.
-     */
-    public bool isAlive() {
-        return s.isAlive();
-    }
+        auto user = new User(this);
+        addUser(user);
 
-    public void startServer() {
-        while (isAlive()) {
-            auto c = s.accept();
-            auto user = new User(c, this);
-            auto ut = new UserThread(user);
-            ut.start();
-            addUser(user);
+        // Start reading in extra fiber
+        auto reader = runTask(&startReading, conn, user);//, client_context);
+
+        scope(exit)
+        {
+            if(conn.connected)
+                conn.close();
+
+            if (user.pipe.connected)
+                user.pipe.close();
+
+            user.disconnect("Lost connection");
+
+            reader.interrupt();
+            reader.join();
+        }
+
+        while (conn.connected && reader.running && user.isConnected())
+        {
+            // send in case something is written into the pipe
+            if (user.pipe.waitForData(dur!"seconds"(1)))
+                conn.write(user.pipe, user.pipe.leastSize);
         }
     }
 
-    private class UserThread : Thread {
+    public void startReading(TCPConnection conn, User user) {
 
-        private User u;
+        scope(exit)
+        {
+            if (conn.connected)
+                conn.close();
 
-        this(User u) {
-            this.u = u;
-            super(&run);
+            if (user.pipe.connected)
+                user.pipe.close();
         }
 
-        private : void run() {
-            u.handle();
+        bool bWaitPong;
+        string receivedText;
+        char[1] buffer;
+        Captures!(string, ulong) line;
+        while (conn.connected && user.isConnected())
+        {
+            while ( conn.waitForData(dur!"seconds"(60)) == false )
+            {
+                if (bWaitPong)
+                {
+                    // user was inactive for 120 seconds and did not pong back
+                    conn.close();
+                    writeln("user didn't pong");
+                    break;
+                }
+                else
+                {
+                    // check if user is still alive after 60 seconds
+                    conn.write("PING 127.0.0.1\n");
+                    conn.flush();
+                    writeln("asking for pong");
+                    bWaitPong = true;
+                }
+            }
+
+            // user seems alive
+            bWaitPong = false;
+
+            receivedText = "";
+            while(receivedText.length == 0 ? true : receivedText[$-1] != '\n')
+            {
+                conn.read((cast(ubyte*)&buffer)[0 .. 1]);
+                receivedText ~= to!string(buffer[0 .. 1]);
+            }
+
+            writeln("RECV %s: %s".format(user.getHostmask(),
+                    receivedText.rreplace(regex(r"\r?\n"), "")));
+
+            try {
+                line = parseLine(receivedText.rreplace(regex(r"\r?\n"), ""));
+            } catch (Exception e) {
+                writeln(e);
+                continue;
+            }
+            auto command = line["command"].toUpper();
+
+            if (getPass() !is null && !user.correctPass) {
+                if (command != "PASS" && command != "PONG" && command != "CAP") continue;
+            }
+            if (!user.isRegistered() && (command != "CAP" && command != "PONG" && command != "USER" && command != "NICK")) continue;
+
+            auto ic = getCommandHandler().getCommand(command);
+            if (ic is null) {
+                user.sendLine(generateLine(user, LineType.ErrUnknownCommand, command ~ " :Unknown command"));
+                continue;
+            }
+            ic.run(user, line);
         }
     }
-
 }

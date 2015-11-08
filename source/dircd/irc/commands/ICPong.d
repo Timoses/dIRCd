@@ -16,7 +16,6 @@ public class ICPong : ICommand {
     public void run(User u, Captures!(string, ulong) line) {
         auto params = line["params"];
         if (params.strip() == "" || params != u.getIRC().getHost()) return;
-        u.setLastPong(Clock.currTime().toUnixTime());
     }
 
 }
