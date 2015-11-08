@@ -1,3 +1,9 @@
 *.o
 *.sublime-*
-bin
+.dub
+docs.json
+__dummy.html
+*.obj
+
+# OSX specific ignores
+.DS_Store

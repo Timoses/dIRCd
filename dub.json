@@ -1,0 +1,8 @@
+{
+	"name": "dircd",
+	"description": "An IRC daemon written in D.",
+	"copyright": "Copyright © 2015, Kyle Clemens",
+	"authors": ["Kyle Clemens"],
+	"dependencies": {
+	}
+}

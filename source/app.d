@@ -1,4 +1,4 @@
-module dircd.dIRCd;
+
 
 import dircd.irc.IRC;
 
